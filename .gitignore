@@ -218,3 +218,21 @@ __marimo__/
 
 # Streamlit
 .streamlit/secrets.toml
+
+@"
+
+# Python environment
+.venv/
+__pycache__/
+*.pyc
+.env
+
+# Local recordings
+recordings/
+*.mp4
+*.avi
+
+# Downloaded ML models
+models/*.task
+models/*.tflite
+"@ | Add-Content .gitignore
