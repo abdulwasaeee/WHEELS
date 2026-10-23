@@ -236,3 +236,6 @@ recordings/
 models/*.task
 models/*.tflite
 "@ | Add-Content .gitignore
+
+test_keyboard.py
+test_pynput.py
