@@ -3,6 +3,7 @@ import time
 from collections import Counter, deque
 
 import cv2
+import mediapipe as mp
 
 from vision.hand_tracker import HandTracker
 from vision.gesture_classifier import GestureClassifier
@@ -27,6 +28,7 @@ class GestureSmoother:
 
         if counts:
             candidate, votes = counts.most_common(1)[0]
+
             if votes >= self.required_votes:
                 self.stable_value = candidate
 
@@ -42,9 +44,14 @@ def draw_text(
     color=(255, 255, 255), scale=0.6
 ):
     cv2.putText(
-        frame, str(text), (x, y),
+        frame,
+        str(text),
+        (x, y),
         cv2.FONT_HERSHEY_SIMPLEX,
-        scale, color, 2, cv2.LINE_AA
+        scale,
+        color,
+        2,
+        cv2.LINE_AA,
     )
 
 
@@ -55,7 +62,8 @@ def draw_bar(frame, x, y, width, value, color):
         frame,
         (x, y),
         (x + width, y + 15),
-        (120, 120, 120), 2
+        (120, 120, 120),
+        2,
     )
 
     if value > 0:
@@ -63,7 +71,8 @@ def draw_bar(frame, x, y, width, value, color):
             frame,
             (x, y),
             (x + int(width * value), y + 15),
-            color, -1
+            color,
+            -1,
         )
 
 
@@ -87,8 +96,10 @@ def draw_fingers(frame, states):
             frame,
             f"{name.upper()}: "
             f"{'UP' if active else 'DOWN'}",
-            20, 330 + i * 27,
-            color, 0.5
+            20,
+            330 + i * 27,
+            color,
+            0.5,
         )
 
 
@@ -103,14 +114,16 @@ def draw_steering(frame, steering):
         frame,
         (cx - radius, y),
         (cx + radius, y),
-        (255, 255, 255), 2
+        (255, 255, 255),
+        2,
     )
 
     cv2.line(
         frame,
         (cx, y - 15),
         (cx, y + 15),
-        (0, 255, 0), 2
+        (0, 255, 0),
+        2,
     )
 
     marker_x = int(cx + steering * radius)
@@ -119,13 +132,30 @@ def draw_steering(frame, steering):
         frame,
         (marker_x, y),
         12,
-        (0, 255, 255), -1
+        (0, 255, 255),
+        -1,
+    )
+
+
+def left_index_only(landmarks, classifier):
+    """
+    Recognize left index finger extended,
+    with thumb, middle, ring and pinky folded.
+    """
+    states = classifier.finger_states(landmarks)
+
+    return (
+        states["index"]
+        and not states["thumb"]
+        and not states["middle"]
+        and not states["ring"]
+        and not states["pinky"]
     )
 
 
 def main():
     print("=" * 50)
-    print("WHEELS AI - HAND PRESERVING GREEN SCREEN")
+    print("WHEELS AI - INDEX FINGER AUTODRIVE")
     print("=" * 50)
 
     camera = cv2.VideoCapture(0, cv2.CAP_DSHOW)
@@ -147,21 +177,21 @@ def main():
     steering_tracker = SteeringTracker(
         dead_zone=0.035,
         max_offset=0.22,
-        smoothing=0.22
+        smoothing=0.22,
     )
 
     speed_smoother = GestureSmoother()
 
     autodrive_hold = HoldGesture(
-        hold_seconds=1.2,
+        hold_seconds=2.0,
         cooldown_seconds=2.0,
-        release_seconds=0.35
+        release_seconds=0.35,
     )
 
     reverse_hold = HoldGesture(
         hold_seconds=0.35,
         cooldown_seconds=0.0,
-        release_seconds=0.15
+        release_seconds=0.15,
     )
 
     reverse_active = False
@@ -174,10 +204,9 @@ def main():
         controller = GameController()
 
         print("[WHEELS] Vision online.")
-        print("[WHEELS] Hands protected from green screen.")
         print("[WHEELS] Right hand: Forward / Reverse")
-        print("[WHEELS] Left hand: Steering")
-        print("[WHEELS] Both hands down: Autodrive")
+        print("[WHEELS] Left hand: Proportional steering")
+        print("[WHEELS] Left index held 2s: Autodrive")
         print("[WHEELS] C: Calibrate steering")
         print("[WHEELS] F8: Enable / Disable")
         print("[WHEELS] ESC: Emergency stop")
@@ -191,28 +220,19 @@ def main():
                 break
 
             frame = cv2.flip(frame, 1)
-
-            # Keep an unannotated image for segmentation.
             raw_frame = frame.copy()
 
-            # MediaPipe processes the original camera image.
-            annotated_frame, result = tracker.process(frame)
+            _, result = tracker.process(frame)
 
-            # Preserve hands while replacing the room.
+            # Green screen with protected hands
             frame = background_remover.apply(
                 raw_frame,
-                result.hand_landmarks
+                result.hand_landmarks,
             )
 
-            # Draw landmarks AFTER segmentation.
             height, width = frame.shape[:2]
 
-            connections = (
-                cv2  # Placeholder avoided below
-            )
-
-            import mediapipe as mp
-
+            # Draw hand skeletons after segmentation
             hand_connections = (
                 mp.tasks.vision
                 .HandLandmarksConnections
@@ -229,7 +249,7 @@ def main():
                         (int(a.x * width), int(a.y * height)),
                         (int(b.x * width), int(b.y * height)),
                         (0, 255, 255),
-                        2
+                        2,
                     )
 
                 for landmark in landmarks:
@@ -237,19 +257,21 @@ def main():
                         frame,
                         (
                             int(landmark.x * width),
-                            int(landmark.y * height)
+                            int(landmark.y * height),
                         ),
                         4,
                         (0, 0, 255),
-                        -1
+                        -1,
                     )
 
             speed_data = None
             steering_landmarks = None
             finger_states = None
-            right_down = False
-            left_down = False
 
+            right_down = False
+            index_gesture = False
+
+            # Detect each hand
             for i, landmarks in enumerate(
                 result.hand_landmarks
             ):
@@ -258,51 +280,57 @@ def main():
                     .category_name
                 )
 
-                orientation_data = (
-                    orientation.classify(landmarks)
-                )
-
                 if hand == "Right":
                     speed_data = (
-                        classifier.classify_left(
-                            landmarks
-                        )
+                        classifier.classify_left(landmarks)
                     )
+
                     finger_states = speed_data.get(
                         "finger_states"
                     )
-                    right_down = orientation_data["down"]
+
+                    right_down = (
+                        orientation.classify(landmarks)["down"]
+                    )
 
                 elif hand == "Left":
                     steering_landmarks = landmarks
-                    left_down = orientation_data["down"]
+
+                    index_gesture = left_index_only(
+                        landmarks,
+                        classifier,
+                    )
 
             both_visible = (
                 speed_data is not None
                 and steering_landmarks is not None
             )
 
-            both_down = (
-                both_visible
-                and right_down
-                and left_down
+            # ----------------------------------
+            # INDEX FINGER AUTODRIVE
+            # ----------------------------------
+            index_hold_active = (
+                index_gesture and controller.enabled
             )
 
             autodrive_triggered = (
-                autodrive_hold.update(
-                    both_down and controller.enabled
-                )
+                autodrive_hold.update(index_hold_active)
             )
 
             if autodrive_triggered:
-                controller.toggle_autodrive()
+                if controller.toggle_autodrive():
+                    print(
+                        "[WHEELS] Index gesture toggled autodrive."
+                    )
 
+            # ----------------------------------
+            # REVERSE
+            # ----------------------------------
             reverse_candidate = (
                 controller.enabled
                 and right_down
-                and not left_down
-                and not both_down
                 and not controller.autodrive
+                and not index_hold_active
             )
 
             reverse_hold.update(reverse_candidate)
@@ -317,7 +345,9 @@ def main():
             ):
                 reverse_active = True
 
-            # Right-hand speed
+            # ----------------------------------
+            # RIGHT HAND SPEED
+            # ----------------------------------
             throttle = 0.0
             handbrake = False
             speed_status = "NOT DETECTED"
@@ -326,12 +356,11 @@ def main():
                 if right_down:
                     speed_smoother.clear()
 
-                    if both_down:
-                        speed_status = "AUTODRIVE GESTURE"
-                    elif reverse_active:
-                        speed_status = "REVERSE"
-                    else:
-                        speed_status = "REVERSE HOLD"
+                    speed_status = (
+                        "REVERSE"
+                        if reverse_active
+                        else "REVERSE HOLD"
+                    )
 
                 else:
                     level = speed_smoother.update(
@@ -352,14 +381,17 @@ def main():
             else:
                 speed_smoother.clear()
 
-            # Left-hand steering
+            # ----------------------------------
+            # LEFT HAND STEERING
+            # ----------------------------------
             steering = 0.0
             steering_status = "NOT DETECTED"
 
             if steering_landmarks is not None:
-                if both_down:
+                if index_hold_active:
                     steering_tracker.reset_tracking()
-                    steering_status = "AUTODRIVE GESTURE"
+                    steering_status = "AUTODRIVE HOLD"
+
                 else:
                     steering = steering_tracker.update(
                         steering_landmarks
@@ -383,14 +415,16 @@ def main():
             else:
                 steering_tracker.reset_tracking()
 
+            # ----------------------------------
+            # GAME CONTROL
+            # ----------------------------------
             ready = (
                 both_visible
-                and speed_smoother.stable_value
-                is not None
+                and speed_smoother.stable_value is not None
                 and steering_tracker.calibrated
             )
 
-            if controller.autodrive or both_down:
+            if controller.autodrive or index_hold_active:
                 controller.release_all()
 
             elif reverse_candidate:
@@ -403,7 +437,7 @@ def main():
                         throttle=0.0,
                         steering=steering,
                         handbrake=False,
-                        reverse=True
+                        reverse=True,
                     )
                 else:
                     controller.release_all()
@@ -413,36 +447,47 @@ def main():
                     throttle=throttle,
                     steering=steering,
                     handbrake=handbrake,
-                    reverse=False
+                    reverse=False,
                 )
+
             else:
                 controller.release_all()
 
+            # ----------------------------------
+            # FPS
+            # ----------------------------------
             now = time.perf_counter()
             dt = max(now - previous_time, 0.001)
             previous_time = now
 
             instant_fps = 1.0 / dt
+
             fps = (
-                instant_fps if fps == 0
+                instant_fps
+                if fps == 0
                 else 0.85 * fps
                 + 0.15 * instant_fps
             )
 
             height, width = frame.shape[:2]
 
+            # Dashboard background
             overlay = frame.copy()
 
             cv2.rectangle(
-                overlay, (0, 0),
+                overlay,
+                (0, 0),
                 (width, 300),
-                (20, 20, 20), -1
+                (20, 20, 20),
+                -1,
             )
 
             cv2.rectangle(
-                overlay, (0, 305),
+                overlay,
+                (0, 305),
                 (285, 485),
-                (20, 20, 20), -1
+                (20, 20, 20),
+                -1,
             )
 
             frame = cv2.addWeighted(
@@ -450,31 +495,32 @@ def main():
                 frame, 0.35, 0
             )
 
+            # Dashboard text
             draw_text(
                 frame,
                 "WHEELS AI - GREEN SCREEN",
                 20, 35,
-                (0, 255, 0), 0.85
+                (0, 255, 0), 0.85,
             )
 
             draw_text(
                 frame,
                 f"RIGHT HAND: {speed_status}",
                 20, 75,
-                (0, 255, 255)
+                (0, 255, 255),
             )
 
             draw_text(
                 frame,
                 f"THROTTLE: {throttle*100:.0f}%",
-                20, 110
+                20, 110,
             )
 
             draw_text(
                 frame,
                 f"LEFT HAND: {steering_status}",
                 20, 145,
-                (255, 255, 0)
+                (255, 255, 0),
             )
 
             mode = (
@@ -482,8 +528,8 @@ def main():
                 if not controller.enabled
                 else "AUTODRIVE"
                 if controller.autodrive
-                else "GESTURE HOLD"
-                if both_down
+                else "INDEX HOLD"
+                if index_hold_active
                 else "REVERSE"
                 if reverse_active
                 else "MANUAL"
@@ -497,51 +543,55 @@ def main():
                 20, 180,
                 (0, 255, 0)
                 if mode in ("MANUAL", "AUTODRIVE")
-                else (0, 165, 255)
+                else (0, 165, 255),
+            )
+
+            draw_text(
+                frame,
+                f"LEFT INDEX ONLY: {index_gesture}",
+                20, 215,
             )
 
             draw_text(
                 frame,
                 f"RIGHT DOWN: {right_down}",
-                20, 215
-            )
-
-            draw_text(
-                frame,
-                f"LEFT DOWN: {left_down}",
-                20, 245
+                20, 245,
             )
 
             draw_text(
                 frame,
                 f"FPS: {fps:.1f}",
                 max(20, width - 155),
-                35
+                35,
             )
 
+            # Autodrive progress bar
             progress = (
                 autodrive_hold.progress()
-                if both_down else 0.0
+                if index_hold_active else 0.0
             )
 
             draw_text(
                 frame,
                 "AUTODRIVE HOLD",
                 20, 280,
-                (255, 255, 0), 0.5
+                (255, 255, 0), 0.5,
             )
 
             draw_bar(
-                frame, 185, 266,
+                frame,
+                185, 266,
                 160, progress,
-                (0, 255, 255)
+                (0, 255, 255),
             )
 
             draw_fingers(frame, finger_states)
 
             draw_bar(
-                frame, 20, 505, 250,
-                throttle, (0, 255, 0)
+                frame,
+                20, 505, 250,
+                throttle,
+                (0, 255, 0),
             )
 
             draw_steering(frame, steering)
@@ -550,12 +600,12 @@ def main():
                 frame,
                 "C: CALIBRATE | F8: TOGGLE | ESC: STOP",
                 20, height - 20,
-                (255, 255, 255), 0.5
+                (255, 255, 255), 0.5,
             )
 
             cv2.imshow(
-                "WHEELS - Hand-Preserving Green Screen",
-                frame
+                "WHEELS - Index Finger Autodrive",
+                frame,
             )
 
             key = cv2.waitKey(1) & 0xFF
